@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mesh Governance Tool</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        :root { --primary: #007AFF; --bg: #f2f2f7; --success: #34c759; --secondary: #8e8e93; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, sans-serif; margin: 0; background: var(--bg); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+        
+        /* Header & Peer List */
+        .header { background: #fff; padding: 12px; border-bottom: 1px solid #d1d1d6; flex-shrink: 0; }
+        .setup-row { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
+        .peer-list-container { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+        .peer-list-container::-webkit-scrollbar { display: none; }
+        .peer-chip { background: #e9ecef; padding: 4px 10px; border-radius: 12px; font-size: 11px; white-space: nowrap; border: 1px solid #dee2e6; display: flex; align-items: center; gap: 5px; }
+        .dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; }
+
+        /* Main Layout */
+        .main-container { display: flex; flex: 1; overflow: hidden; }
+        @media (max-width: 768px) { .main-container { flex-direction: column; } }
+        .column { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: #fff; border-right: 1px solid #d1d1d6; }
+        .scroll-area { flex: 1; overflow-y: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+
+        /* Components */
+        .card { background: #f9f9f9; border-radius: 10px; padding: 12px; margin-bottom: 15px; border: 1px solid #e5e5ea; }
+        input { border: 1px solid #c6c6c8; padding: 10px; border-radius: 8px; font-size: 16px; width: 100%; outline: none; }
+        button { background: var(--primary); color: white; border: none; padding: 10px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+        
+        /* Poll UI */
+        .poll-question { font-size: 20px; font-weight: 700; margin-bottom: 15px; color: var(--primary); }
+        .option-item { display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px; border-radius: 10px; margin-bottom: 8px; border: 1px solid #e5e5ea; }
+        
+        /* Chat UI */
+        #chat-messages { display: flex; flex-direction: column; gap: 8px; }
+        .msg { padding: 8px 12px; border-radius: 14px; max-width: 85%; font-size: 14px; }
+        .msg.sent { background: var(--primary); color: white; align-self: flex-end; }
+        .msg.received { background: #e5e5ea; color: black; align-self: flex-start; }
+        .msg-sender { font-size: 10px; font-weight: bold; opacity: 0.7; display: block; }
+        .chat-input-bar { padding: 12px; background: #fff; border-top: 1px solid #d1d1d6; display: flex; gap: 8px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="setup-row">
+            <span style="font-size: 13px;">Me: <strong id="my-id-display">...</strong></span>
+            <div id="peer-list" class="peer-list-container">
+                </div>
+        </div>
+        <div class="setup-row">
+            <input type="text" id="nickname-input" placeholder="My Name" style="flex: 0.5;">
+            <button onclick="joinAs(document.getElementById('nickname-input').value)" style="background: var(--secondary); padding: 8px 12px;">Set</button>
+            <input type="text" id="peer-id-input" placeholder="Friend's Name" style="flex: 1;">
+            <button onclick="connectToPeer()" style="padding: 8px 12px;">Connect</button>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="column">
+            <div class="scroll-area">
+                <div class="card">
+                    <input type="text" id="poll-title-input" placeholder="Question/Topic?">
+                    <button onclick="updateTitle()" style="width:100%; margin-top:8px;">Set Topic</button>
+                </div>
+                <div id="active-question" class="poll-question">Waiting for Topic...</div>
+                <div style="display:flex; gap:8px; margin-bottom:15px;">
+                    <input type="text" id="new-option-text" placeholder="Add option...">
+                    <button onclick="addOption()">Add</button>
+                </div>
+                <div id="poll-container"></div>
+            </div>
+        </div>
+
+        <div class="column">
+            <div class="scroll-area" id="chat-scroll">
+                <div id="chat-messages"></div>
+            </div>
+            <div class="chat-input-bar">
+                <input type="text" id="chat-input" placeholder="Discuss...">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let pollData = { question: "Open Discussion", options: [] };
+        let myName = "";
+        let connections = []; 
+        let peer = null;
+
+        function joinAs(id) {
+            if (peer) peer.destroy();
+            peer = new Peer(id || undefined);
+            peer.on('open', newId => { 
+                myName = newId; 
+                document.getElementById('my-id-display').innerText = newId; 
+            });
+            peer.on('connection', conn => setupConnection(conn));
+        }
+
+        function connectToPeer() {
+            const target = document.getElementById('peer-id-input').value;
+            if (target && target !== myName) {
+                setupConnection(peer.connect(target));
+            }
+            document.getElementById('peer-id-input').value = "";
+        }
+
+        function setupConnection(conn) {
+            conn.on('open', () => {
+                // Prevent duplicate connections
+                if (!connections.find(c => c.peer === conn.peer)) {
+                    connections.push(conn);
+                    updatePeerUI();
+                    broadcast({ type: 'SYNC', payload: pollData });
+                }
+            });
+
+            conn.on('data', data => {
+                if (data.type === 'SYNC') {
+                    pollData = data.payload;
+                    renderPoll();
+                } else if (data.type === 'CHAT') {
+                    appendMessage(data.sender, data.payload, 'received');
+                }
+            });
+
+            conn.on('close', () => {
+                connections = connections.filter(c => c.peer !== conn.peer);
+                updatePeerUI();
+            });
+        }
+
+        function broadcast(data) {
+            connections.forEach(c => { if (c.open) c.send(data); });
+        }
+
+        function updatePeerUI() {
+            const list = document.getElementById('peer-list');
+            if (connections.length === 0) {
+                list.innerHTML = '<span style="font-size:11px; color:#999;">No peers connected</span>';
+                return;
+            }
+            list.innerHTML = connections.map(c => `
+                <div class="peer-chip"><div class="dot"></div>${c.peer}</div>
+            `).join('');
+        }
+
+        // --- APP LOGIC ---
+        function updateTitle() {
+            const val = document.getElementById('poll-title-input').value;
+            if (!val) return;
+            pollData.question = val;
+            renderPoll();
+            broadcast({ type: 'SYNC', payload: pollData });
+        }
+
+        function addOption() {
+            const txt = document.getElementById('new-option-text').value;
+            if (!txt) return;
+            pollData.options.push({ text: txt, votes: 0 });
+            document.getElementById('new-option-text').value = "";
+            renderPoll();
+            broadcast({ type: 'SYNC', payload: pollData });
+        }
+
+        function vote(i) {
+            pollData.options[i].votes++;
+            renderPoll();
+            broadcast({ type: 'SYNC', payload: pollData });
+        }
+
+        function renderPoll() {
+            document.getElementById('active-question').innerText = pollData.question;
+            const container = document.getElementById('poll-container');
+            container.innerHTML = pollData.options.map((opt, i) => `
+                <div class="option-item">
+                    <span>${opt.text}</span>
+                    <div style="display:flex; align-items:center;">
+                        <span style="font-weight:bold; color:var(--primary); margin-right:12px; font-size:18px;">${opt.votes}</span>
+                        <button onclick="vote(${i})" style="background:var(--success); padding:5px 12px;">Vote</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('chat-input');
+            if (!input.value) return;
+            broadcast({ type: 'CHAT', sender: myName, payload: input.value });
+            appendMessage('You', input.value, 'sent');
+            input.value = "";
+        }
+
+        function appendMessage(sender, text, side) {
+            const div = document.createElement('div');
+            div.className = `msg ${side}`;
+            div.innerHTML = `<span class="msg-sender">${sender}</span>${text}`;
+            document.getElementById('chat-messages').appendChild(div);
+            const scroll = document.getElementById('chat-scroll');
+            scroll.scrollTop = scroll.scrollHeight;
+        }
+
+        document.getElementById('chat-input').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+        joinAs(null);
+    </script>
+</body>
+</html>
